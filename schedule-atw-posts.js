@@ -22,7 +22,8 @@
  *      Filenames are expected as "<monabbrev><DD>.png", e.g. "aug26.png".
  *   2. Figures out which dates are still missing from the Buffer queue.
  *   3. Schedules as many as the account's plan limit allows, earliest date
- *      first, never before ATW_MIN_DATE (2026-08-01 — first month posted).
+ *      first, never before ATW_MIN_DATE (2026-08-26 — earliest content that
+ *      actually exists in Drive).
  *   4. Posts at POST_TIME_LOCAL in POST_UTC_OFFSET, using the fixed caption
  *      defined in ATW_CAPTION below, with the day's image attached.
  *
@@ -41,7 +42,7 @@
  *   ATW_ROOT_FOLDER_ID    Drive folder ID of the "Social Media" folder
  *                         (the one containing year folders like "2026")
  * Optional:
- *   ATW_MIN_DATE           Default "2026-08-01" — skip any date before this.
+ *   ATW_MIN_DATE           Default "2026-08-26" — skip any date before this.
  *   POST_TIME_LOCAL        Default "19:00:00" (7 PM)
  *   POST_UTC_OFFSET        Default "+08:00" (Asia/Manila)
  *   DRY_RUN                 "true" to log without creating posts
@@ -55,7 +56,7 @@ const CHANNEL_ID = requireEnv("BUFFER_CHANNEL_ID");
 const DRIVE_API_KEY = requireEnv("GOOGLE_DRIVE_API_KEY");
 const ROOT_FOLDER_ID = requireEnv("ATW_ROOT_FOLDER_ID");
 
-const MIN_DATE = process.env.ATW_MIN_DATE || "2026-08-01";
+const MIN_DATE = process.env.ATW_MIN_DATE || "2026-08-26";
 const POST_TIME_LOCAL = process.env.POST_TIME_LOCAL || "19:00:00"; // 7 PM
 const POST_UTC_OFFSET = process.env.POST_UTC_OFFSET || "+08:00"; // Asia/Manila
 const DRY_RUN = process.env.DRY_RUN === "true";
