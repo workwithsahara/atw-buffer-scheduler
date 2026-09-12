@@ -1,51 +1,57 @@
 #!/usr/bin/env node
 /**
- * ATW → Buffer daily queue top-up
+ * ATW → Buffer daily queue top-up (EVERGREEN, multi-track, v3)
  * -----------------------------------------------------------------------
- * Standalone automation for "Around The World Manpower Services Inc" on
- * Facebook — a channel connected to the SAME Buffer account already used
- * for LAYA's LinkedIn + TikTok (Buffer's free plan allows up to 3
- * channels per account, and this was the 3rd open slot). Unrelated brand,
- * unrelated content, kept in its own repo/script on purpose so nothing
- * here can affect the LAYA automations or vice versa.
+ * Posts to "Around The World Manpower Services Inc" on Facebook — ONE
+ * channel, THREE independent daily posts (tracks), each with its own
+ * image library, caption, and time of day:
  *
- * Every post uses the SAME fixed caption (a recruitment ad) — this repo
- * does not read per-day captions from filenames like the LAYA repos do.
- * Only the image changes daily.
+ *   ORIGINAL  — general "we're hiring abroad" recruitment ad   — 12:00 PM
+ *   DH        — Domestic Helper pooling campaign                —  8:00 AM
+ *   SKILLED   — Skilled roles pooling campaign                  —  8:00 PM
  *
- * Runs unattended (e.g. via GitHub Actions cron, or any daily cron job).
- * Each run:
- *   1. Discovers year folders under ATW_ROOT_FOLDER_ID (e.g. "2026", "2027"),
- *      then month folders under each year (e.g. "August"), then PNGs in each
- *      month folder. No folder IDs are hardcoded — add a new year or month
- *      folder in Drive and it's picked up automatically on the next run.
- *      Filenames are expected as "<monabbrev><DD>.png", e.g. "aug26.png".
- *   2. Figures out which dates are still missing from the Buffer queue.
- *   3. Schedules as many as the account's plan limit allows, earliest date
- *      first, never before ATW_MIN_DATE (2026-08-26 — earliest content that
- *      actually exists in Drive).
- *   4. Posts at POST_TIME_LOCAL in POST_UTC_OFFSET, using the fixed caption
- *      defined in ATW_CAPTION below, with the day's image attached.
+ * All times are Asia/Manila (+08:00).
  *
- * Because Buffer plans cap total *scheduled* (not yet sent) posts, this
- * script is safe to run every day forever — as old posts publish, slots
- * free up and the next unscheduled day gets queued automatically.
+ * TWO LIBRARY FORMATS, TWO LOOP MECHANISMS
+ * -----------------------------------------------------------------------
+ * ORIGINAL uses the pre-existing dated structure — no reorganizing, no
+ * renaming, nothing converted. Files already live at:
+ *     <ATW_ORIGINAL_FOLDER_ID>/<year>/<MonthFullName>/<monabbrev><DD>.png
+ * e.g. .../2026/September/sep24.png
+ * Because filenames encode month+day (not year), the SAME file naturally
+ * applies to that month/day every year forever — Sept 24, 2026 and Sept
+ * 24, 2027 both resolve to whichever year's "sep24.png" actually exists
+ * in Drive (preferring the most recently added year if more than one
+ * year has that date, so refreshing old content is just adding a newer
+ * year folder). This gives evergreen looping for free, with zero file
+ * operations — it's just how real calendar dates already work.
  *
- * Required environment variables (set as repo/CI secrets):
- *   BUFFER_API_KEY        Personal API key for the Buffer account this
- *                         channel lives on
- *   BUFFER_ORG_ID         That Buffer account's organization ID
- *   BUFFER_CHANNEL_ID     The Facebook channel ID for this Page (single
- *                         channel, not a comma list — this repo posts to
- *                         one Page only)
- *   GOOGLE_DRIVE_API_KEY  API key with Drive API enabled (read-only is fine)
- *   ATW_ROOT_FOLDER_ID    Drive folder ID of the "Social Media" folder
- *                         (the one containing year folders like "2026")
+ * DH and SKILLED use a FLAT set of images named "Day001.png".."Day365.png"
+ * (no year/month folders). The day number for any calendar date is
+ * computed from a fixed EPOCH_START constant — no persisted counter, no
+ * file renaming ever needed. EPOCH_START is set so TODAY = Day 365 for
+ * both tracks, wrapping to Day 1 tomorrow, cycling forever.
+ *
+ * De-duplication against Buffer's scheduled queue is done by exact dueAt
+ * timestamp (to the minute), not just by date, since three tracks post
+ * at three different times on the same channel.
+ *
+ * Required environment variables (repo/CI secrets):
+ *   BUFFER_API_KEY          Personal API key (same Buffer account as LAYA)
+ *   BUFFER_ORG_ID           That Buffer account's organization ID
+ *   BUFFER_CHANNEL_ID       The Facebook channel ID for the ATW Page
+ *                           (same channel for all three tracks)
+ *   GOOGLE_DRIVE_API_KEY    API key with Drive API enabled (read-only)
+ *   ATW_ORIGINAL_FOLDER_ID  Drive folder ID — dated year/month structure
+ *                           (existing content, e.g. 1ygnGJ...SMdF)
+ *   ATW_DH_FOLDER_ID        Drive folder ID — flat Day001.png..Day365.png
+ *   ATW_SKILLED_FOLDER_ID   Drive folder ID — flat Day001.png..Day365.png
  * Optional:
- *   ATW_MIN_DATE           Default "2026-08-26" — skip any date before this.
- *   POST_TIME_LOCAL        Default "19:00:00" (7 PM)
- *   POST_UTC_OFFSET        Default "+08:00" (Asia/Manila)
  *   DRY_RUN                 "true" to log without creating posts
+ *   LOOKAHEAD_DAYS          Default 14 — how many future days to consider
+ *                           scheduling per track (actual count created is
+ *                           still capped by Buffer's live scheduled-post
+ *                           limit per channel)
  *
  * Requires Node.js 18+ (uses global fetch).
  */
@@ -54,26 +60,17 @@ const BUFFER_API_KEY = requireEnv("BUFFER_API_KEY");
 const ORG_ID = requireEnv("BUFFER_ORG_ID");
 const CHANNEL_ID = requireEnv("BUFFER_CHANNEL_ID");
 const DRIVE_API_KEY = requireEnv("GOOGLE_DRIVE_API_KEY");
-const ROOT_FOLDER_ID = requireEnv("ATW_ROOT_FOLDER_ID");
 
-const MIN_DATE = process.env.ATW_MIN_DATE || "2026-08-26";
-const POST_TIME_LOCAL = process.env.POST_TIME_LOCAL || "19:00:00"; // 7 PM
-const POST_UTC_OFFSET = process.env.POST_UTC_OFFSET || "+08:00"; // Asia/Manila
 const DRY_RUN = process.env.DRY_RUN === "true";
+const LOOKAHEAD_DAYS = parseInt(process.env.LOOKAHEAD_DAYS || "14", 10);
 
-// Fixed caption used on every single post. Edit this directly (and commit)
-// if the recruitment ad copy ever changes — it applies to every future post
-// from the next run onward, not retroactively to already-scheduled ones.
-const ATW_CAPTION = `Ready to work abroad? Your opportunity starts here.
-We're hiring for multiple overseas positions in Malaysia, Bahrain, Qatar, and Saudi Arabia.
-📩 To fast-track your application, send us a DM with:
-• Full Name
-• Position Applying For
-• Age
-• Gender
-Our team will contact you and guide you through the entire application process.
-Apply today and take the first step toward a brighter future!
-#WorkAbroad #DomesticHelpers #CashierJobs #WaiterJobs #BabysitterJobs #NannyJobs #MidwifeJobs #CaregiverJobs #NurseJobs #CleanerJobs #MalaysiaJobs #BahrainJobs #QatarJobs #SaudiArabiaJobs`;
+const BUFFER_GRAPHQL_URL = "https://api.buffer.com/graphql";
+const POST_UTC_OFFSET = "+08:00"; // Asia/Manila, all three tracks
+
+// EPOCH_START for the flat-library tracks (DH, SKILLED) only. Today = Day
+// 365; tomorrow wraps to Day 1. ORIGINAL doesn't use this at all — it
+// loops via real month/day matching instead (see header comment).
+const EPOCH_START = "2026-09-12";
 
 const MONTH_NUMBERS = {
   jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
@@ -85,7 +82,75 @@ const FULL_MONTH_TO_NUM = {
   september: "09", october: "10", november: "11", december: "12",
 };
 
-const BUFFER_GRAPHQL_URL = "https://api.buffer.com/graphql";
+// ---------------------------------------------------------------------------
+// Track definitions — this is the ONLY place to edit if a caption, post
+// time, or folder ever changes.
+// ---------------------------------------------------------------------------
+const TRACKS = [
+  {
+    name: "ORIGINAL",
+    format: "dated", // year/month folders, monDD.png filenames, loops by month+day
+    folderId: requireEnv("ATW_ORIGINAL_FOLDER_ID"),
+    postTimeLocal: "12:00:00", // 12 PM Manila
+    caption: `Ready ka na bang mag-work abroad? Baka ito na ang opportunity na hinihintay mo!
+
+DMW License Number: 495-LB-02102025-R
+
+We're hiring for multiple overseas positions in different countries, and we want to know what kind of opportunity you're looking for.
+
+📩 To fast-track your application, send us a DM with:
+
+• Full Name
+• Position or type of work na gusto mo
+• Preferred country 
+• Age
+• Gender
+
+Hindi sure kung anong position or country ang bagay sa'yo? No worries! Sabihin mo lang kung anong klaseng work ang hanap mo and kung may preferred country ka. Our team will help you check the available opportunities that may be a good fit for you.
+
+From application hanggang sa next steps, we'll guide you through the process.
+Your next opportunity may be closer than you think. PM mo kame, now na! 💛`,
+  },
+  {
+    name: "DH",
+    format: "flat", // flat Day001.png..Day365.png, loops via EPOCH_START
+    folderId: requireEnv("ATW_DH_FOLDER_ID"),
+    postTimeLocal: "08:00:00", // 8 AM Manila
+    caption: `Gusto mo ba mag DH abroad pero hindi mo alam kung san mag uumpisa? Message mo kame! Tutulungan ka namen 💛
+
+DMW License Number: 495-LB-02102025-R
+
+📩 PM mo to samen: 
+
+• Full Name
+• Position Applying For: DH 
+• Age
+• Gender
+• Preferred Country
+
+Eto na yung sign na inaantay mo 💛`,
+  },
+  {
+    name: "SKILLED",
+    format: "flat",
+    folderId: requireEnv("ATW_SKILLED_FOLDER_ID"),
+    postTimeLocal: "20:00:00", // 8 PM Manila
+    caption: `Gusto mo ba mag abroad? Your opportunity starts here.
+We're hiring for multiple overseas positions - PM mo lang samen kung ano target role mo, baka meron kame for you! 💛
+
+DMW License Number: 495-LB-02102025-R
+
+📩 To fast-track your application, send us a DM with:
+
+• Full Name
+• Position Applying For
+• Age
+• Gender
+• Preferred Country
+
+Our team will contact you and guide you through the entire application process.`,
+  },
+];
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -96,8 +161,111 @@ function requireEnv(name) {
   return v;
 }
 
+function addDaysToDateStr(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
-// Google Drive helpers
+// FLAT format (DH, SKILLED): evergreen day-number math
+// ---------------------------------------------------------------------------
+// diffDays=0 (today)     -> 365
+// diffDays=1 (tomorrow)  -> 1
+// diffDays=2             -> 2   ...and so on, wrapping every 365 days.
+function dayNumberForDate(dateStr) {
+  const d = Date.parse(`${dateStr}T00:00:00Z`);
+  const epoch = Date.parse(`${EPOCH_START}T00:00:00Z`);
+  const diffDays = Math.round((d - epoch) / 86400000);
+  return (((diffDays - 1) % 365) + 365) % 365 + 1;
+}
+
+// Parses "Day001.png" / "Day07.png" / "Day7.png" -> 1..365
+function parseDayFilename(name) {
+  const m = name.match(/^Day0*(\d{1,3})\.png$/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (n < 1 || n > 365) return null;
+  return n;
+}
+
+async function buildFlatDayMap(folderId) {
+  const files = await listDriveFolderFiles(folderId);
+  const map = {};
+  for (const f of files) {
+    const n = parseDayFilename(f.name);
+    if (n === null) {
+      console.warn(`  Skipping file with unexpected name: ${f.name}`);
+      continue;
+    }
+    map[n] = { fileId: f.id, name: f.name };
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// DATED format (ORIGINAL): year/month folders, monDD.png filenames,
+// looped by matching month+day across whichever years exist.
+// ---------------------------------------------------------------------------
+
+// Parses "sep24.png" -> { monthAbbrev: "sep", day: 24 }
+function parseDatedFilename(name) {
+  const m = name.match(/^([a-z]{3})(\d{1,2})\.png$/i);
+  if (!m) return null;
+  return { monthAbbrev: m[1].toLowerCase(), day: parseInt(m[2], 10) };
+}
+
+// Builds a map keyed by "MM-DD" (year-agnostic) -> { fileId, sourceYear }.
+// If the same month/day exists in more than one year folder, the highest
+// (most recently added) year wins — so refreshing content for a specific
+// date is just adding a newer year folder with that file, no deletion
+// needed.
+async function buildMonthDayMap(rootFolderId) {
+  const map = {};
+  const yearFolders = await listSubfolders(rootFolderId);
+
+  for (const yearFolder of yearFolders) {
+    if (!/^\d{4}$/.test(yearFolder.name)) {
+      console.warn(`  Skipping non-year folder under ATW root: ${yearFolder.name}`);
+      continue;
+    }
+    const year = parseInt(yearFolder.name, 10);
+    const monthFolders = await listSubfolders(yearFolder.id);
+
+    for (const monthFolder of monthFolders) {
+      const monthKey = monthFolder.name.toLowerCase();
+      const monthNumFromFullName = FULL_MONTH_TO_NUM[monthKey];
+      if (!monthNumFromFullName) {
+        console.warn(`  Skipping unrecognized month folder: ${yearFolder.name}/${monthFolder.name}`);
+        continue;
+      }
+
+      const files = await listDriveFolderFiles(monthFolder.id);
+      for (const f of files) {
+        const parsed = parseDatedFilename(f.name);
+        if (!parsed) {
+          console.warn(`  Skipping file with unexpected name: ${yearFolder.name}/${monthFolder.name}/${f.name}`);
+          continue;
+        }
+        const monthNumFromFile = MONTH_NUMBERS[parsed.monthAbbrev];
+        if (!monthNumFromFile) {
+          console.warn(`  Skipping file with unrecognized month abbreviation: ${f.name}`);
+          continue;
+        }
+        const mdKey = `${monthNumFromFullName}-${String(parsed.day).padStart(2, "0")}`;
+        const existing = map[mdKey];
+        if (!existing || year > existing.sourceYear) {
+          map[mdKey] = { fileId: f.id, sourceYear: year, name: f.name };
+        }
+      }
+    }
+  }
+
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Google Drive helpers (shared)
 // ---------------------------------------------------------------------------
 async function listSubfolders(folderId) {
   const url = new URL("https://www.googleapis.com/drive/v3/files");
@@ -121,7 +289,7 @@ async function listDriveFolderFiles(folderId) {
   const url = new URL("https://www.googleapis.com/drive/v3/files");
   url.searchParams.set("q", `'${folderId}' in parents and mimeType = 'image/png' and trashed = false`);
   url.searchParams.set("fields", "files(id,name)");
-  url.searchParams.set("pageSize", "100");
+  url.searchParams.set("pageSize", "1000");
   url.searchParams.set("key", DRIVE_API_KEY);
 
   const res = await fetch(url);
@@ -130,61 +298,6 @@ async function listDriveFolderFiles(folderId) {
   }
   const data = await res.json();
   return data.files || [];
-}
-
-// Parses "aug26.png" -> { monthAbbrev: "aug", day: 26 }
-function parseFilename(name) {
-  const m = name.match(/^([a-z]{3})(\d{1,2})\.png$/i);
-  if (!m) return null;
-  return { monthAbbrev: m[1].toLowerCase(), day: parseInt(m[2], 10) };
-}
-
-// Discovers ATW_ROOT_FOLDER_ID/<year>/<MonthFullName>/<monabbrev><DD>.png
-// and builds a calendar: { "2026-08-26": { fileId }, ... }
-async function buildCalendar() {
-  const calendar = {};
-  const yearFolders = await listSubfolders(ROOT_FOLDER_ID);
-
-  for (const yearFolder of yearFolders) {
-    if (!/^\d{4}$/.test(yearFolder.name)) {
-      console.warn(`Skipping non-year folder under ATW root: ${yearFolder.name}`);
-      continue;
-    }
-    const year = yearFolder.name;
-    const monthFolders = await listSubfolders(yearFolder.id);
-
-    for (const monthFolder of monthFolders) {
-      const monthKey = monthFolder.name.toLowerCase();
-      const monthNumFromFullName = FULL_MONTH_TO_NUM[monthKey];
-      if (!monthNumFromFullName) {
-        console.warn(`Skipping unrecognized month folder: ${year}/${monthFolder.name}`);
-        continue;
-      }
-
-      const files = await listDriveFolderFiles(monthFolder.id);
-      for (const f of files) {
-        const parsed = parseFilename(f.name);
-        if (!parsed) {
-          console.warn(`Skipping file with unexpected name: ${year}/${monthFolder.name}/${f.name}`);
-          continue;
-        }
-        const monthNumFromFile = MONTH_NUMBERS[parsed.monthAbbrev];
-        if (!monthNumFromFile) {
-          console.warn(`Skipping file with unrecognized month abbreviation: ${f.name}`);
-          continue;
-        }
-        if (monthNumFromFile !== monthNumFromFullName) {
-          console.warn(
-            `Filename/folder month mismatch, using folder: ${year}/${monthFolder.name}/${f.name}`
-          );
-        }
-        const dateKey = `${year}-${monthNumFromFullName}-${String(parsed.day).padStart(2, "0")}`;
-        calendar[dateKey] = { fileId: f.id };
-      }
-    }
-  }
-
-  return calendar;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +335,10 @@ async function getOrgScheduledPostLimit() {
   return org ? org.limits.scheduledPosts : 10;
 }
 
-async function getScheduledDates(channelId) {
+// Returns a Set of exact dueAt ISO timestamps (to the minute) already
+// scheduled on this channel — used to de-dup across all three tracks
+// sharing the same channel.
+async function getScheduledDueAts(channelId) {
   const query = `
     query Posts($organizationId: OrganizationId!, $channelIds: [ChannelId!]) {
       posts(input: { organizationId: $organizationId, filter: { channelIds: $channelIds, status: [scheduled] } }, first: 100) {
@@ -231,10 +347,10 @@ async function getScheduledDates(channelId) {
     }
   `;
   const data = await bufferRequest(query, { organizationId: ORG_ID, channelIds: [channelId] });
-  return new Set(data.posts.edges.map((e) => e.node.dueAt.slice(0, 10)));
+  return new Set(data.posts.edges.map((e) => e.node.dueAt.slice(0, 16))); // to the minute
 }
 
-async function createPost({ channelId, fileId, dueAtIso }) {
+async function createPost({ channelId, fileId, dueAtIso, caption, altText }) {
   const mutation = `
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
@@ -250,19 +366,19 @@ async function createPost({ channelId, fileId, dueAtIso }) {
     mode: "customScheduled",
     schedulingType: "automatic",
     dueAt: dueAtIso,
-    text: ATW_CAPTION,
-    metadata: { facebook: { type: "post" } }, // Facebook requires an explicit post type
+    text: caption,
+    metadata: { facebook: { type: "post" } },
     assets: [
       {
         image: {
           url: `https://lh3.googleusercontent.com/d/${fileId}`,
-          metadata: { altText: "Around The World Manpower Services — job opening" },
+          metadata: { altText },
         },
       },
     ],
   };
   if (DRY_RUN) {
-    console.log(`[DRY RUN] Would create post: channel=${channelId} dueAt=${dueAtIso} (fixed caption)`);
+    console.log(`  [DRY RUN] Would create post: dueAt=${dueAtIso}`);
     return;
   }
   const data = await bufferRequest(mutation, { input });
@@ -270,7 +386,7 @@ async function createPost({ channelId, fileId, dueAtIso }) {
   if (payload.message) {
     throw new Error(`createPost failed: ${payload.message}`);
   }
-  console.log(`Scheduled: channel=${channelId} dueAt=${dueAtIso} -> post ${payload.post.id}`);
+  console.log(`  Scheduled: dueAt=${dueAtIso} -> post ${payload.post.id}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,49 +394,84 @@ async function createPost({ channelId, fileId, dueAtIso }) {
 // ---------------------------------------------------------------------------
 async function main() {
   console.log(`Run started ${new Date().toISOString()}${DRY_RUN ? " [DRY RUN]" : ""}`);
-
-  const calendar = await buildCalendar();
-  const sortedDates = Object.keys(calendar).sort();
-  console.log(`Loaded ${sortedDates.length} days of content from Drive.`);
+  console.log(`Flat-track epoch: ${EPOCH_START} (today = Day 365, wraps to Day 1 tomorrow)`);
 
   const limit = await getOrgScheduledPostLimit();
-  console.log(`Buffer scheduled-post limit per channel: ${limit}`);
-  console.log(`Minimum date: ${MIN_DATE}`);
+  console.log(`Buffer scheduled-post limit for this channel: ${limit}`);
+
+  const scheduledDueAts = await getScheduledDueAts(CHANNEL_ID);
+  let scheduledCount = scheduledDueAts.size;
+  console.log(`Channel ${CHANNEL_ID}: ${scheduledCount}/${limit} slots currently used (across all tracks).`);
 
   const today = new Date().toISOString().slice(0, 10);
-
-  const scheduledDates = await getScheduledDates(CHANNEL_ID);
-  let scheduledCount = scheduledDates.size;
-  console.log(`Channel ${CHANNEL_ID}: ${scheduledCount}/${limit} slots currently used.`);
 
   let consecutiveFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
-  for (const dateKey of sortedDates) {
-    if (scheduledCount >= limit) break;
-    if (dateKey < today) continue;
-    if (dateKey < MIN_DATE) continue;
-    if (scheduledDates.has(dateKey)) continue;
+  for (const track of TRACKS) {
+    console.log(`\n--- Track: ${track.name} (${track.format}) ---`);
 
-    const { fileId } = calendar[dateKey];
-    const dueAtIso = `${dateKey}T${POST_TIME_LOCAL}${POST_UTC_OFFSET}`;
+    let flatDayMap = null;
+    let monthDayMap = null;
+    if (track.format === "flat") {
+      flatDayMap = await buildFlatDayMap(track.folderId);
+      console.log(`  Loaded ${Object.keys(flatDayMap).length} images from Drive.`);
+    } else {
+      monthDayMap = await buildMonthDayMap(track.folderId);
+      console.log(`  Loaded ${Object.keys(monthDayMap).length} unique month/day slots from Drive.`);
+    }
 
-    try {
-      await createPost({ channelId: CHANNEL_ID, fileId, dueAtIso });
-      scheduledCount++;
-      consecutiveFailures = 0;
-    } catch (err) {
-      console.error(`Failed to schedule ${dateKey}: ${err.message}`);
-      consecutiveFailures++;
-      if (/limit/i.test(err.message)) break;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.error(`Stopping after ${consecutiveFailures} consecutive failures.`);
+    for (let offset = 0; offset < LOOKAHEAD_DAYS; offset++) {
+      if (scheduledCount >= limit) {
+        console.log(`  Channel scheduled-post limit reached — stopping.`);
         break;
+      }
+      const dateStr = addDaysToDateStr(today, offset);
+      const dueAtIso = `${dateStr}T${track.postTimeLocal}${POST_UTC_OFFSET}`;
+      const dueAtKey = dueAtIso.slice(0, 16);
+
+      if (scheduledDueAts.has(dueAtKey)) continue;
+
+      let entry, label;
+      if (track.format === "flat") {
+        const dayNum = dayNumberForDate(dateStr);
+        entry = flatDayMap[dayNum];
+        label = `Day${dayNum}`;
+      } else {
+        const mdKey = dateStr.slice(5); // "MM-DD"
+        entry = monthDayMap[mdKey];
+        label = mdKey;
+      }
+
+      if (!entry) {
+        console.warn(`  No image for ${label} (${dateStr}) — skipping.`);
+        continue;
+      }
+
+      try {
+        await createPost({
+          channelId: CHANNEL_ID,
+          fileId: entry.fileId,
+          dueAtIso,
+          caption: track.caption,
+          altText: `Around The World Manpower Services — ${track.name} — ${label}`,
+        });
+        scheduledDueAts.add(dueAtKey);
+        scheduledCount++;
+        consecutiveFailures = 0;
+      } catch (err) {
+        console.error(`  Failed to schedule ${track.name} ${dateStr} (${label}): ${err.message}`);
+        consecutiveFailures++;
+        if (/limit/i.test(err.message)) break;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          console.error(`  Stopping after ${consecutiveFailures} consecutive failures.`);
+          break;
+        }
       }
     }
   }
 
-  console.log("Run complete.");
+  console.log("\nRun complete.");
 }
 
 main().catch((err) => {
