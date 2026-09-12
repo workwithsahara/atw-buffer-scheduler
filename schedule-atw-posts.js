@@ -36,6 +36,14 @@
  * timestamp (to the minute), not just by date, since three tracks post
  * at three different times on the same channel.
  *
+ * SCHEDULING ORDER: day-by-day, not track-by-track. For each future date
+ * (today, today+1, today+2...), all three tracks are attempted before
+ * moving to the next date. This matters because the channel's scheduled-
+ * post cap is shared across all three tracks — filling one track's full
+ * lookahead before touching the others would starve them of slots
+ * entirely. Interleaving by date means the limited slots get spread
+ * evenly across DH/Original/Skilled instead of one track eating them all.
+ *
  * Required environment variables (repo/CI secrets):
  *   BUFFER_API_KEY          Personal API key (same Buffer account as LAYA)
  *   BUFFER_ORG_ID           That Buffer account's organization ID
@@ -408,43 +416,44 @@ async function main() {
   let consecutiveFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
-  for (const track of TRACKS) {
-    console.log(`\n--- Track: ${track.name} (${track.format}) ---`);
-
-    let flatDayMap = null;
-    let monthDayMap = null;
-    if (track.format === "flat") {
-      flatDayMap = await buildFlatDayMap(track.folderId);
-      console.log(`  Loaded ${Object.keys(flatDayMap).length} images from Drive.`);
-    } else {
-      monthDayMap = await buildMonthDayMap(track.folderId);
-      console.log(`  Loaded ${Object.keys(monthDayMap).length} unique month/day slots from Drive.`);
+  for (let offset = 0; offset < LOOKAHEAD_DAYS; offset++) {
+    if (scheduledCount >= limit) {
+      console.log(`Channel scheduled-post limit reached — stopping.`);
+      break;
     }
+    const dateStr = addDaysToDateStr(today, offset);
 
-    for (let offset = 0; offset < LOOKAHEAD_DAYS; offset++) {
-      if (scheduledCount >= limit) {
-        console.log(`  Channel scheduled-post limit reached — stopping.`);
-        break;
+    for (const track of TRACKS) {
+      if (scheduledCount >= limit) break;
+
+      if (!track._dayMap) {
+        console.log(`\n--- Track: ${track.name} (${track.format}) ---`);
+        if (track.format === "flat") {
+          track._dayMap = await buildFlatDayMap(track.folderId);
+          console.log(`  Loaded ${Object.keys(track._dayMap).length} images from Drive.`);
+        } else {
+          track._dayMap = await buildMonthDayMap(track.folderId);
+          console.log(`  Loaded ${Object.keys(track._dayMap).length} unique month/day slots from Drive.`);
+        }
       }
-      const dateStr = addDaysToDateStr(today, offset);
+
       const dueAtIso = `${dateStr}T${track.postTimeLocal}${POST_UTC_OFFSET}`;
       const dueAtKey = dueAtIso.slice(0, 16);
-
       if (scheduledDueAts.has(dueAtKey)) continue;
 
       let entry, label;
       if (track.format === "flat") {
         const dayNum = dayNumberForDate(dateStr);
-        entry = flatDayMap[dayNum];
+        entry = track._dayMap[dayNum];
         label = `Day${dayNum}`;
       } else {
-        const mdKey = dateStr.slice(5); // "MM-DD"
-        entry = monthDayMap[mdKey];
+        const mdKey = dateStr.slice(5);
+        entry = track._dayMap[mdKey];
         label = mdKey;
       }
 
       if (!entry) {
-        console.warn(`  No image for ${label} (${dateStr}) — skipping.`);
+        console.warn(`  [${track.name}] No image for ${label} (${dateStr}) — skipping.`);
         continue;
       }
 
@@ -460,7 +469,7 @@ async function main() {
         scheduledCount++;
         consecutiveFailures = 0;
       } catch (err) {
-        console.error(`  Failed to schedule ${track.name} ${dateStr} (${label}): ${err.message}`);
+        console.error(`  [${track.name}] Failed to schedule ${dateStr} (${label}): ${err.message}`);
         consecutiveFailures++;
         if (/limit/i.test(err.message)) break;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
