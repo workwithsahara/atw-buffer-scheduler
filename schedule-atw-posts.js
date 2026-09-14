@@ -36,6 +36,15 @@
  * timestamp (to the minute), not just by date, since three tracks post
  * at three different times on the same channel.
  *
+ * ERROR RETRY: Buffer occasionally fails to fetch the Drive image at
+ * publish time — a transient glitch, not a real problem with the file
+ * (confirmed 2026-09-14: retrying the exact same post a second time
+ * succeeded). Every run checks for any posts stuck in "error" status on
+ * this channel and retries each once via immediate publish, before doing
+ * anything else. A persistently broken post (bad permissions, deleted
+ * file) will keep showing up and get retried again daily — never
+ * silently abandoned, never retried more than once per run.
+ *
  * SCHEDULING ORDER: day-by-day, not track-by-track. For each future date
  * (today, today+1, today+2...), all three tracks are attempted before
  * moving to the next date. This matters because the channel's scheduled-
@@ -398,11 +407,111 @@ async function createPost({ channelId, fileId, dueAtIso, caption, altText }) {
 }
 
 // ---------------------------------------------------------------------------
+// Error retry
+// ---------------------------------------------------------------------------
+// Buffer occasionally fails to fetch the Drive image at publish time (a
+// transient glitch, not a real problem with the file or its permissions —
+// confirmed by hand on 2026-09-14, where retrying the exact same post a
+// second time succeeded). A failed post's status becomes "error" and it
+// silently drops out of both the scheduled and sent lists, leaving a gap
+// with no automatic recovery. This finds any such posts on the channel and
+// retries each once per run via shareNow (immediate publish, since its
+// original scheduled time has already passed). If a post is still broken
+// (bad permissions, deleted file, etc.) rather than just transiently
+// glitchy, it will keep showing up here and get retried again on the next
+// day's run — never silently abandoned, but also never retried more than
+// once per day so a persistently broken post can't loop or spam.
+async function getErroredPosts(channelId) {
+  const query = `
+    query ErroredPosts($organizationId: OrganizationId!, $channelIds: [ChannelId!]) {
+      posts(input: { organizationId: $organizationId, filter: { channelIds: $channelIds, status: [error] } }, first: 100) {
+        edges {
+          node {
+            id
+            text
+            assets {
+              ... on ImageAsset {
+                source
+                thumbnail
+                image { altText }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await bufferRequest(query, { organizationId: ORG_ID, channelIds: [channelId] });
+  return data.posts.edges.map((e) => e.node);
+}
+
+async function retryErroredPost(post) {
+  const mutation = `
+    mutation RetryPost($input: EditPostInput!) {
+      editPost(input: $input) {
+        ... on PostActionSuccess { post { id status } }
+        ... on NotFoundError { message }
+        ... on UnauthorizedError { message }
+        ... on UnexpectedError { message }
+        ... on RestProxyError { message }
+        ... on LimitReachedError { message }
+        ... on InvalidInputError { message }
+      }
+    }
+  `;
+  const asset = post.assets && post.assets[0];
+  const input = {
+    id: post.id,
+    mode: "shareNow",
+    text: post.text,
+    metadata: { facebook: { type: "post" } },
+    assets: asset
+      ? [
+          {
+            image: {
+              url: asset.source,
+              thumbnailUrl: asset.thumbnail,
+              metadata: { altText: (asset.image && asset.image.altText) || "" },
+            },
+          },
+        ]
+      : [],
+  };
+  if (DRY_RUN) {
+    console.log(`  [DRY RUN] Would retry errored post ${post.id}`);
+    return true;
+  }
+  const data = await bufferRequest(mutation, { input });
+  const payload = data.editPost;
+  if (payload.message) {
+    console.error(`  Retry failed for post ${post.id}: ${payload.message}`);
+    return false;
+  }
+  console.log(`  Retried post ${post.id} -> status ${payload.post.status}`);
+  return true;
+}
+
+async function retryAllErroredPosts(channelId) {
+  const errored = await getErroredPosts(channelId);
+  if (errored.length === 0) {
+    console.log("No errored posts to retry.");
+    return;
+  }
+  console.log(`Found ${errored.length} errored post(s) — retrying each once...`);
+  for (const post of errored) {
+    await retryErroredPost(post);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
   console.log(`Run started ${new Date().toISOString()}${DRY_RUN ? " [DRY RUN]" : ""}`);
   console.log(`Flat-track epoch: ${EPOCH_START} (today = Day 365, wraps to Day 1 tomorrow)`);
+
+  console.log(`\n--- Checking for errored posts to retry ---`);
+  await retryAllErroredPosts(CHANNEL_ID);
 
   const limit = await getOrgScheduledPostLimit();
   console.log(`Buffer scheduled-post limit for this channel: ${limit}`);
