@@ -318,6 +318,86 @@ async function listDriveFolderFiles(folderId) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GitHub media mirror (stable public hosting for Buffer)
+// ---------------------------------------------------------------------------
+// Buffer fetches media at PUBLISH time, which for scheduled posts can be up
+// to LOOKAHEAD_DAYS later. The old https://lh3.googleusercontent.com/d/<id>
+// links are an unofficial Google endpoint, not a real public file host, and
+// intermittently fail Buffer's fetcher -- this is the confirmed root cause
+// of the recurring "trouble uploading that image" errors (2026-09-17).
+//
+// Fix: mirror each image, once, into this same repo's media/ folder (this
+// repo is public) and give Buffer a raw.githubusercontent.com URL instead.
+// That satisfies Buffer's own hosting requirements: public, direct, https,
+// and stable for as long as the post is scheduled.
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY || ""; // "owner/repo", auto-set by Actions
+
+function rawGithubUrl(mediaPath) {
+  return `https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/${mediaPath}`;
+}
+
+async function githubFileExists(mediaPath) {
+  const res = await fetch(
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${mediaPath}`,
+    {
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+      },
+    }
+  );
+  return res.status === 200;
+}
+
+// Downloads the file from Drive and commits it into media/<mediaPath> in
+// this repo, unless it's already there. Returns the stable public URL.
+async function mirrorDriveFileToGithub(fileId, mediaPath) {
+  const fullPath = `media/${mediaPath}`;
+  if (await githubFileExists(fullPath)) return rawGithubUrl(fullPath);
+
+  const driveRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${DRIVE_API_KEY}`
+  );
+  if (!driveRes.ok) {
+    throw new Error(
+      `Drive download failed for ${fileId}: ${driveRes.status} ${await driveRes.text()}`
+    );
+  }
+  const buf = Buffer.from(await driveRes.arrayBuffer());
+
+  const putRes = await fetch(
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${fullPath}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: `Mirror ${fullPath} for stable Buffer hosting`,
+        content: buf.toString("base64"),
+      }),
+    }
+  );
+  if (!putRes.ok) {
+    throw new Error(
+      `GitHub mirror upload failed for ${fullPath}: ${putRes.status} ${await putRes.text()}`
+    );
+  }
+  return rawGithubUrl(fullPath);
+}
+
+// Extracts the Drive file id from an old-style lh3.googleusercontent.com
+// asset URL (e.g. "https://lh3.googleusercontent.com/d/<id>"), so the
+// error-retry path can mirror the same file an already-errored post used.
+function driveFileIdFromLh3Url(url) {
+  const m = /lh3\.googleusercontent\.com\/d\/([^/?]+)/.exec(url || "");
+  return m ? m[1] : null;
+}
+
 // Buffer GraphQL helpers
 // ---------------------------------------------------------------------------
 async function bufferRequest(query, variables) {
@@ -367,7 +447,7 @@ async function getScheduledDueAts(channelId) {
   return new Set(data.posts.edges.map((e) => e.node.dueAt.slice(0, 16))); // to the minute
 }
 
-async function createPost({ channelId, fileId, dueAtIso, caption, altText }) {
+async function createPost({ channelId, imageUrl, dueAtIso, caption, altText }) {
   const mutation = `
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
@@ -388,7 +468,7 @@ async function createPost({ channelId, fileId, dueAtIso, caption, altText }) {
     assets: [
       {
         image: {
-          url: `https://lh3.googleusercontent.com/d/${fileId}`,
+          url: imageUrl,
           metadata: { altText },
         },
       },
@@ -459,7 +539,20 @@ async function retryErroredPost(post) {
       }
     }
   `;
-  const asset = post.assets && post.assets[0];
+  let asset = post.assets && post.assets[0];
+  if (asset) {
+    const driveId = driveFileIdFromLh3Url(asset.source);
+    if (driveId) {
+      try {
+        const newUrl = await mirrorDriveFileToGithub(driveId, `_retried/${driveId}.png`);
+        asset = { ...asset, source: newUrl, thumbnail: newUrl };
+      } catch (mirrorErr) {
+        console.error(
+          `  Could not mirror image for retry of post ${post.id}: ${mirrorErr.message}`
+        );
+      }
+    }
+  }
   const input = {
     id: post.id,
     mode: "shareNow",
@@ -567,9 +660,11 @@ async function main() {
       }
 
       try {
+        const mediaPath = `${track.name}/${entry.name}`;
+        const imageUrl = await mirrorDriveFileToGithub(entry.fileId, mediaPath);
         await createPost({
           channelId: CHANNEL_ID,
-          fileId: entry.fileId,
+          imageUrl,
           dueAtIso,
           caption: track.caption,
           altText: `Around The World Manpower Services — ${track.name} — ${label}`,
