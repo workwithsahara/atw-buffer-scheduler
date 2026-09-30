@@ -2,9 +2,10 @@ name: Top up ATW Buffer queue
 
 on:
   schedule:
-    # Runs daily at 04:00 UTC (12:00 PM Manila). One run tops up all three
-    # tracks (ORIGINAL, DH, SKILLED) since they share the same channel.
-    - cron: "0 4 * * *"
+    # Runs twice daily (04:00 and 16:00 UTC). One run tops up every track
+    # (ORIGINAL, DH, SKILLED, AM PM tracks) since they share the same channel.
+    # Two runs a day give the queue a safety net if one run is skipped or late.
+    - cron: "0 4,16 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
