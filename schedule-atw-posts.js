@@ -82,7 +82,13 @@ const DRY_RUN = process.env.DRY_RUN === "true";
 const LOOKAHEAD_DAYS = parseInt(process.env.LOOKAHEAD_DAYS || "14", 10);
 
 const BUFFER_GRAPHQL_URL = "https://api.buffer.com/graphql";
-const POST_UTC_OFFSET = "+08:00"; // Asia/Manila, all three tracks
+const POST_UTC_OFFSET = "+08:00"; // Asia/Manila, all tracks
+
+// "AM PM" Drive folder (ATW > AM PM): weekday banners/squares, WorkAbroad
+// images, and the single application-form image. Folder must be shared as
+// "Anyone with the link: Viewer" so the Drive API key can read it.
+const AMPM_FOLDER_ID = process.env.ATW_AMPM_FOLDER_ID || "1SPL55Nw2-2KeLazYnlvTus54zYJufc_M";
+const FORM_IMAGE_FILE_ID = "1RvoKCB6FW_KRCkDarQTLtrNiVO07TQ8C"; // "ChatGPT Image Sep 30, 2026, 08_47_51 PM.png"
 
 // EPOCH_START for the flat-library tracks (DH, SKILLED) only. Today = Day
 // 365; tomorrow wraps to Day 1. ORIGINAL doesn't use this at all — it
@@ -103,6 +109,49 @@ const FULL_MONTH_TO_NUM = {
 // Track definitions — this is the ONLY place to edit if a caption, post
 // time, or folder ever changes.
 // ---------------------------------------------------------------------------
+const DETAILS_BLOCK = `Paki bigay din ang mga sumusunod:
+
+Full name:
+Gender:
+Contact number:
+Target Role:
+Age:
+
+Thank you and we look forward to assisting you 💛`;
+
+// Index 0 = Monday ... 6 = Sunday. No day names as titles, captions start
+// straight from the message.
+const WEEKDAY_HOOKS = [
+  `Kape na lang ba ang nagpapatibok ng puso mo, o kaba kasi Monday na naman? Wag mag-tiis sa job na iniiyakan mo. Send that resume and let's get you a role you won't dread.`,
+  `Bes, aminin, pre-pandemic pa yung last update ng resume mo. Time for a makeover! Pass it to us at baka ito na ang career plot twist mo this year.`,
+  `Midweek crisis? Kung pagod ka na kakaisip kung mag-re-resign ka na ba, eto na yung sign na hinihintay mo. Apply today para tapos na ang mga what-ifs mo sa buhay.`,
+  `Mentally out of office na ba? Wag muna, channel that 'almost Friday' energy into hitting submit. I-send mo na yang application mo para next time, ibang team na ang ka-meeting mo.`,
+  `Bago ka mag-checkout ng cart mo o mag-ready for Friday night out, i-checkout mo muna yung career mo. Apply now, and step into the weekend knowing you actually did something for your future.`,
+  `Nakahiga ka lang at nagso-scroll? Make that screen time productive. Isang submit lang, baka next week may solid na interview ka na. Tara, apply na kahit naka-pajama ka pa!`,
+  `Umiiyak ka na ba deep inside kasi may pasok na naman bukas? Cure that Sunday anxiety by looking for a better opportunity. Mas masarap matulog pag alam mong may nilulutong bago for your career. Send us your CV!`,
+];
+const WEEKDAY_CAPTIONS = WEEKDAY_HOOKS.map((h) => `${h}\n\n${DETAILS_BLOCK}`);
+
+const FORM_CAPTION = `Para mas mabilis ang proseso ng inyong application, pakisagutan ang aming application form sa link na ito:
+
+👉 https://forms.gle/LFvTQvvFfuse5h9AA
+
+${DETAILS_BLOCK}`;
+
+const WORKABROAD_CAPTION = `NOW ACCEPTING APPLICATIONS FOR OVERSEAS EMPLOYMENT!
+
+All-expense-paid • No placement fee • Cash assistance available • Passporting assistance • Airfare • Accommodation • Meal allowance • Transportation assistance
+
+24–39 years old
+
+PM only with:
+Full Name • Mobile No. • Gender • Location • Preferred Role • Passport: With/Without
+
+Benefits listed above are applicable to selected positions.
+
+Around the World Manpower Services, Inc.
+DMW License No. 495-LB-02102025-R`;
+
 const TRACKS = [
   {
     name: "ORIGINAL",
@@ -166,6 +215,43 @@ DMW License Number: 495-LB-02102025-R
 • Preferred Country
 
 Our team will contact you and guide you through the entire application process.`,
+  },
+  // ---- "AM PM" tracks (weekday-based: image N = Monday..Sunday) ----
+  {
+    name: "AMPM_BANNER",
+    format: "weekday",
+    optional: true, // a problem with this track must never stop the older tracks
+    folderId: AMPM_FOLDER_ID,
+    filePattern: /^ATW_Hiring_Banner_(\d)_/i,
+    postTimeLocal: "09:00:00", // 9 AM Manila
+    captions: WEEKDAY_CAPTIONS,
+  },
+  {
+    name: "WORKABROAD",
+    format: "weekday",
+    optional: true,
+    folderId: AMPM_FOLDER_ID,
+    filePattern: /^ATW_WorkAbroad_Style_(\d)_/i,
+    postTimeLocal: "10:00:00", // 10 AM Manila
+    caption: WORKABROAD_CAPTION,
+  },
+  {
+    name: "FORM_2PM",
+    format: "fixed", // same single image every day
+    optional: true,
+    folderId: AMPM_FOLDER_ID,
+    fixedFileId: FORM_IMAGE_FILE_ID,
+    postTimeLocal: "14:00:00", // 2 PM Manila
+    caption: FORM_CAPTION,
+  },
+  {
+    name: "AMPM_SQUARE",
+    format: "weekday",
+    optional: true,
+    folderId: AMPM_FOLDER_ID,
+    filePattern: /^ATW_Hiring_Square_(\d)_/i,
+    postTimeLocal: "21:00:00", // 9 PM Manila
+    captions: WEEKDAY_CAPTIONS,
   },
 ];
 
@@ -284,6 +370,33 @@ async function buildMonthDayMap(rootFolderId) {
 // ---------------------------------------------------------------------------
 // Google Drive helpers (shared)
 // ---------------------------------------------------------------------------
+// Weekday helpers for the "AM PM" tracks. dateStr is a Manila calendar date.
+// Monday = 1 ... Sunday = 7.
+function weekdayNumberForDate(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`).getUTCDay();
+  return d === 0 ? 7 : d;
+}
+
+const folderListingCache = {};
+async function listFolderCached(folderId) {
+  if (!folderListingCache[folderId]) {
+    folderListingCache[folderId] = await listDriveFolderFiles(folderId);
+  }
+  return folderListingCache[folderId];
+}
+
+async function buildWeekdayMap(track) {
+  const files = await listFolderCached(track.folderId);
+  const map = {};
+  for (const f of files) {
+    const m = f.name.match(track.filePattern);
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 7) map[n] = { fileId: f.id, name: f.name };
+  }
+  return map;
+}
+
 async function listSubfolders(folderId) {
   const url = new URL("https://www.googleapis.com/drive/v3/files");
   url.searchParams.set(
@@ -444,7 +557,7 @@ async function getScheduledDueAts(channelId) {
     }
   `;
   const data = await bufferRequest(query, { organizationId: ORG_ID, channelIds: [channelId] });
-  return new Set(data.posts.edges.map((e) => e.node.dueAt.slice(0, 16))); // to the minute
+  return new Set(data.posts.edges.map((e) => new Date(e.node.dueAt).toISOString().slice(0, 16))); // UTC, to the minute
 }
 
 async function createPost({ channelId, imageUrl, dueAtIso, caption, altText }) {
@@ -613,7 +726,14 @@ async function main() {
   let scheduledCount = scheduledDueAts.size;
   console.log(`Channel ${CHANNEL_ID}: ${scheduledCount}/${limit} slots currently used (across all tracks).`);
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Manila calendar date (UTC+8), so weekday tracks and day numbers are right
+  // no matter what hour GitHub actually starts the run.
+  const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  const nowMs = Date.now();
+
+  // Chronological within each day: if the channel's scheduled-post cap cuts a
+  // day short, it is always the latest posts of the day that wait.
+  const orderedTracks = [...TRACKS].sort((a, b) => a.postTimeLocal.localeCompare(b.postTimeLocal));
 
   let consecutiveFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
@@ -624,30 +744,52 @@ async function main() {
       break;
     }
     const dateStr = addDaysToDateStr(today, offset);
+    const weekdayNum = weekdayNumberForDate(dateStr);
 
-    for (const track of TRACKS) {
+    for (const track of orderedTracks) {
       if (scheduledCount >= limit) break;
+
+      const dueAtIso = `${dateStr}T${track.postTimeLocal}${POST_UTC_OFFSET}`;
+      const dueAtMs = Date.parse(dueAtIso);
+      if (dueAtMs <= nowMs + 5 * 60 * 1000) continue; // already past (or too close), nothing to schedule
+      const dueAtKey = new Date(dueAtMs).toISOString().slice(0, 16);
+      if (scheduledDueAts.has(dueAtKey)) continue;
 
       if (!track._dayMap) {
         console.log(`\n--- Track: ${track.name} (${track.format}) ---`);
-        if (track.format === "flat") {
-          track._dayMap = await buildFlatDayMap(track.folderId);
-          console.log(`  Loaded ${Object.keys(track._dayMap).length} images from Drive.`);
-        } else {
-          track._dayMap = await buildMonthDayMap(track.folderId);
-          console.log(`  Loaded ${Object.keys(track._dayMap).length} unique month/day slots from Drive.`);
+        try {
+          if (track.format === "flat") {
+            track._dayMap = await buildFlatDayMap(track.folderId);
+            console.log(`  Loaded ${Object.keys(track._dayMap).length} images from Drive.`);
+          } else if (track.format === "weekday") {
+            track._dayMap = await buildWeekdayMap(track);
+            console.log(`  Loaded weekday images for days: ${Object.keys(track._dayMap).join(", ") || "none"}.`);
+          } else if (track.format === "fixed") {
+            track._dayMap = { 1: { fileId: track.fixedFileId, name: `${track.fixedFileId}.png` } };
+            console.log(`  Using fixed image ${track.fixedFileId}.`);
+          } else {
+            track._dayMap = await buildMonthDayMap(track.folderId);
+            console.log(`  Loaded ${Object.keys(track._dayMap).length} unique month/day slots from Drive.`);
+          }
+        } catch (err) {
+          if (!track.optional) throw err;
+          console.error(`  [${track.name}] Could not load images, skipping this track: ${err.message}`);
+          console.error(`  (Check the Drive folder is shared as "Anyone with the link: Viewer".)`);
+          track._dayMap = {};
         }
       }
-
-      const dueAtIso = `${dateStr}T${track.postTimeLocal}${POST_UTC_OFFSET}`;
-      const dueAtKey = dueAtIso.slice(0, 16);
-      if (scheduledDueAts.has(dueAtKey)) continue;
 
       let entry, label;
       if (track.format === "flat") {
         const dayNum = dayNumberForDate(dateStr);
         entry = track._dayMap[dayNum];
         label = `Day${dayNum}`;
+      } else if (track.format === "weekday") {
+        entry = track._dayMap[weekdayNum];
+        label = `Weekday${weekdayNum}`;
+      } else if (track.format === "fixed") {
+        entry = track._dayMap[1];
+        label = "fixed";
       } else {
         const mdKey = dateStr.slice(5);
         entry = track._dayMap[mdKey];
@@ -655,9 +797,13 @@ async function main() {
       }
 
       if (!entry) {
-        console.warn(`  [${track.name}] No image for ${label} (${dateStr}) — skipping.`);
+        if (Object.keys(track._dayMap).length > 0) {
+          console.warn(`  [${track.name}] No image for ${label} (${dateStr}) — skipping.`);
+        }
         continue;
       }
+
+      const caption = track.captions ? track.captions[weekdayNum - 1] : track.caption;
 
       try {
         const mediaPath = `${track.name}/${entry.name}`;
@@ -666,13 +812,18 @@ async function main() {
           channelId: CHANNEL_ID,
           imageUrl,
           dueAtIso,
-          caption: track.caption,
+          caption,
           altText: `Around The World Manpower Services — ${track.name} — ${label}`,
         });
         scheduledDueAts.add(dueAtKey);
         scheduledCount++;
         consecutiveFailures = 0;
       } catch (err) {
+        if (/already got this one scheduled or posted/i.test(err.message)) {
+          // Buffer's own duplicate guard, not a real failure.
+          console.warn(`  [${track.name}] Buffer treated ${dateStr} (${label}) as a duplicate — skipping.`);
+          continue;
+        }
         console.error(`  [${track.name}] Failed to schedule ${dateStr} (${label}): ${err.message}`);
         consecutiveFailures++;
         if (/limit/i.test(err.message)) break;
