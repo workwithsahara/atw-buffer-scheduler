@@ -241,7 +241,12 @@ Our team will contact you and guide you through the entire application process.`
     optional: true,
     folderId: AMPM_FOLDER_ID,
     fixedFileId: FORM_IMAGE_FILE_ID,
-    postTimeLocal: "14:00:00", // 2 PM Manila
+    postTimeLocal: "14:00:00", // base slot, 2 PM Manila
+    // Post hour rotates day by day: 2 PM, 3 PM, 4 PM, 5 PM, 6 PM, then back
+    // to 2 PM (5-day cycle, Oct 1 2026 = 2 PM), so the same image and
+    // caption never lands at exactly the same time every day.
+    rotatingTimes: ["14:00:00", "15:00:00", "16:00:00", "17:00:00", "18:00:00"],
+    rotationEpoch: "2026-10-01",
     caption: FORM_CAPTION,
   },
   {
@@ -372,6 +377,15 @@ async function buildMonthDayMap(rootFolderId) {
 // ---------------------------------------------------------------------------
 // Weekday helpers for the "AM PM" tracks. dateStr is a Manila calendar date.
 // Monday = 1 ... Sunday = 7.
+function postTimeForDate(track, dateStr) {
+  if (!track.rotatingTimes) return track.postTimeLocal;
+  const n = track.rotatingTimes.length;
+  const diff = Math.round(
+    (Date.parse(`${dateStr}T00:00:00Z`) - Date.parse(`${track.rotationEpoch}T00:00:00Z`)) / 86400000
+  );
+  return track.rotatingTimes[((diff % n) + n) % n];
+}
+
 function weekdayNumberForDate(dateStr) {
   const d = new Date(`${dateStr}T00:00:00Z`).getUTCDay();
   return d === 0 ? 7 : d;
@@ -749,7 +763,7 @@ async function main() {
     for (const track of orderedTracks) {
       if (scheduledCount >= limit) break;
 
-      const dueAtIso = `${dateStr}T${track.postTimeLocal}${POST_UTC_OFFSET}`;
+      const dueAtIso = `${dateStr}T${postTimeForDate(track, dateStr)}${POST_UTC_OFFSET}`;
       const dueAtMs = Date.parse(dueAtIso);
       if (dueAtMs <= nowMs + 5 * 60 * 1000) continue; // already past (or too close), nothing to schedule
       const dueAtKey = new Date(dueAtMs).toISOString().slice(0, 16);
