@@ -126,7 +126,7 @@ be shared as "Anyone with the link: Viewer").
 |---|---|---|---|
 | **AMPM_BANNER** | 9:00 AM | `ATW_Hiring_Banner_1..7` = Monday..Sunday | Weekday caption + details block |
 | **WORKABROAD** | 10:00 AM | `ATW_WorkAbroad_Style_1..7` = Monday..Sunday | Overseas employment caption (same daily) |
-| **FORM_2PM** | 2:00 PM | One fixed image, same every day | Application form link + details block |
+| **FORM_2PM** | Rotates 2, 3, 4, 5, 6 PM, then back to 2 PM (5-day cycle, Oct 1 = 2 PM) | One fixed image, same every day | Application form link + details block |
 | **AMPM_SQUARE** | 9:00 PM | `ATW_Hiring_Square_1..7` = Monday..Sunday | Same weekday caption as the banner |
 
 Weekday tracks use the Manila calendar weekday (Monday = image 1), so
