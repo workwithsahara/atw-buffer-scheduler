@@ -115,3 +115,26 @@ Everything track-specific lives in the `TRACKS` array near the top of
 the relevant track and commit. Takes effect on the next run, for newly
 scheduled posts only (already-scheduled ones keep what they were
 created with).
+
+## "AM PM" tracks (added 2026-09-30)
+
+Four more daily posts on the same Facebook Page, images from the Drive
+folder `ATW > AM PM` (folder ID `1SPL55Nw2-2KeLazYnlvTus54zYJufc_M`, must
+be shared as "Anyone with the link: Viewer").
+
+| Track | Post time (Manila) | Images | Caption |
+|---|---|---|---|
+| **AMPM_BANNER** | 9:00 AM | `ATW_Hiring_Banner_1..7` = Monday..Sunday | Weekday caption + details block |
+| **WORKABROAD** | 10:00 AM | `ATW_WorkAbroad_Style_1..7` = Monday..Sunday | Overseas employment caption (same daily) |
+| **FORM_2PM** | 2:00 PM | One fixed image, same every day | Application form link + details block |
+| **AMPM_SQUARE** | 9:00 PM | `ATW_Hiring_Square_1..7` = Monday..Sunday | Same weekday caption as the banner |
+
+Weekday tracks use the Manila calendar weekday (Monday = image 1), so
+they repeat every week forever with no counter. Captions and times live
+in `TRACKS` and the caption constants at the top of the script. These
+tracks are marked `optional`: if their folder can't be read, they are
+skipped and the older tracks keep running.
+
+The script also skips slots whose time has already passed and compares
+scheduled times in UTC, so re-runs no longer produce "must be in the
+future" or duplicate errors. The workflow now runs twice a day.
