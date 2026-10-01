@@ -227,15 +227,6 @@ Our team will contact you and guide you through the entire application process.`
     captions: WEEKDAY_CAPTIONS,
   },
   {
-    name: "WORKABROAD",
-    format: "weekday",
-    optional: true,
-    folderId: AMPM_FOLDER_ID,
-    filePattern: /^ATW_WorkAbroad_Style_(\d)_/i,
-    postTimeLocal: "10:00:00", // 10 AM Manila
-    caption: WORKABROAD_CAPTION,
-  },
-  {
     name: "FORM_2PM",
     format: "fixed", // same single image every day
     optional: true,
@@ -751,9 +742,43 @@ async function retryAllErroredPosts(channelId) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+// One-off cleanup: delete every scheduled post whose image URL contains the
+// given text (REMOVE_MEDIA_PATTERN, e.g. "/media/WORKABROAD/").
+async function removeScheduledByMedia(pattern) {
+  const query = `
+    query Scheduled($organizationId: OrganizationId!, $channelIds: [ChannelId!]) {
+      posts(input: { organizationId: $organizationId, filter: { channelIds: $channelIds, status: [scheduled] } }, first: 100) {
+        edges { node { id dueAt assets { ... on ImageAsset { source } } } }
+      }
+    }
+  `;
+  const data = await bufferRequest(query, { organizationId: ORG_ID, channelIds: [CHANNEL_ID] });
+  let removed = 0;
+  for (const { node } of data.posts.edges) {
+    const hit = (node.assets || []).some((a) => a && a.source && a.source.includes(pattern));
+    if (!hit) continue;
+    if (DRY_RUN) {
+      console.log(`  [DRY RUN] Would delete post ${node.id} (${node.dueAt})`);
+      continue;
+    }
+    const res = await bufferRequest(
+      `mutation Del($input: DeletePostInput!) { deletePost(input: $input) { __typename } }`,
+      { input: { id: node.id } }
+    );
+    console.log(`  Deleted post ${node.id} (${node.dueAt}) -> ${res.deletePost.__typename}`);
+    removed++;
+  }
+  console.log(`Removed ${removed} scheduled post(s) matching "${pattern}".`);
+}
+
 async function main() {
   console.log(`Run started ${new Date().toISOString()}${DRY_RUN ? " [DRY RUN]" : ""}`);
   console.log(`Flat-track epoch: ${EPOCH_START} (today = Day 365, wraps to Day 1 tomorrow)`);
+
+  if (process.env.REMOVE_MEDIA_PATTERN) {
+    await removeScheduledByMedia(process.env.REMOVE_MEDIA_PATTERN);
+    return;
+  }
 
   if (process.env.POST_NOW_TRACK) {
     await postNow(process.env.POST_NOW_TRACK);
