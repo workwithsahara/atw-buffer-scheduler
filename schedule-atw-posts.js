@@ -218,13 +218,26 @@ Our team will contact you and guide you through the entire application process.`
   },
   // ---- "AM PM" tracks (weekday-based: image N = Monday..Sunday) ----
   {
-    name: "AMPM_BANNER",
+    // 9 AM post. Uses the SQUARE images (correct logo); the old banner images
+    // had the wrong logo and are no longer posted.
+    name: "AMPM_AM",
     format: "weekday",
     optional: true, // a problem with this track must never stop the older tracks
     folderId: AMPM_FOLDER_ID,
-    filePattern: /^ATW_Hiring_Banner_(\d)_/i,
+    filePattern: /^ATW_Hiring_Square_(\d)_/i,
     postTimeLocal: "09:00:00", // 9 AM Manila
     captions: WEEKDAY_CAPTIONS,
+  },
+  {
+    // 10 AM post. Images are pre-fixed copies (correct logo) stored in
+    // media/WORKABROAD/ in this repo, which the scheduler uses before Drive.
+    name: "WORKABROAD",
+    format: "weekday",
+    optional: true,
+    folderId: AMPM_FOLDER_ID,
+    filePattern: /^ATW_WorkAbroad_Style_(\d)_/i,
+    postTimeLocal: "10:00:00", // 10 AM Manila
+    caption: WORKABROAD_CAPTION,
   },
   {
     name: "FORM_2PM",
