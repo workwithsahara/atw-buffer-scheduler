@@ -12,6 +12,10 @@ on:
         description: "Dry run (log only, don't create posts)"
         type: boolean
         default: false
+      remove_media_pattern:
+        description: "Optional one-off: delete scheduled posts whose image URL contains this text (e.g. /media/WORKABROAD/)"
+        type: string
+        default: ""
       post_now_track:
         description: "Optional: publish this track's post for today right now (e.g. WORKABROAD). Leave empty for a normal run."
         type: string
@@ -38,6 +42,7 @@ jobs:
           ATW_ORIGINAL_FOLDER_ID: ${{ secrets.ATW_ORIGINAL_FOLDER_ID }}
           ATW_DH_FOLDER_ID: ${{ secrets.ATW_DH_FOLDER_ID }}
           ATW_SKILLED_FOLDER_ID: ${{ secrets.ATW_SKILLED_FOLDER_ID }}
+          REMOVE_MEDIA_PATTERN: ${{ github.event.inputs.remove_media_pattern }}
           POST_NOW_TRACK: ${{ github.event.inputs.post_now_track }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
