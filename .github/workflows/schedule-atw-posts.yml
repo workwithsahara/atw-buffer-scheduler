@@ -2,16 +2,20 @@ name: Top up ATW Buffer queue
 
 on:
   schedule:
-    # Runs twice daily (04:00 and 16:00 UTC). One run tops up every track
+    # Runs four times daily (04:00, 14:00, 18:00, 22:00 UTC). One run tops up every track
     # (ORIGINAL, DH, SKILLED, AM PM tracks) since they share the same channel.
     # Two runs a day give the queue a safety net if one run is skipped or late.
-    - cron: "0 4,16 * * *"
+    - cron: "0 4,14,18,22 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run (log only, don't create posts)"
         type: boolean
         default: false
+      post_now_track:
+        description: "Optional: publish this track's post for today right now (e.g. WORKABROAD). Leave empty for a normal run."
+        type: string
+        default: ""
 
 jobs:
   schedule-posts:
@@ -34,6 +38,7 @@ jobs:
           ATW_ORIGINAL_FOLDER_ID: ${{ secrets.ATW_ORIGINAL_FOLDER_ID }}
           ATW_DH_FOLDER_ID: ${{ secrets.ATW_DH_FOLDER_ID }}
           ATW_SKILLED_FOLDER_ID: ${{ secrets.ATW_SKILLED_FOLDER_ID }}
+          POST_NOW_TRACK: ${{ github.event.inputs.post_now_track }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node schedule-atw-posts.js
