@@ -574,7 +574,7 @@ async function getScheduledDueAts(channelId) {
   return new Set(data.posts.edges.map((e) => new Date(e.node.dueAt).toISOString().slice(0, 16))); // UTC, to the minute
 }
 
-async function createPost({ channelId, imageUrl, dueAtIso, caption, altText }) {
+async function createPost({ channelId, imageUrl, dueAtIso, caption, altText, shareNow = false }) {
   const mutation = `
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
@@ -587,9 +587,9 @@ async function createPost({ channelId, imageUrl, dueAtIso, caption, altText }) {
   `;
   const input = {
     channelId,
-    mode: "customScheduled",
+    mode: shareNow ? "shareNow" : "customScheduled",
     schedulingType: "automatic",
-    dueAt: dueAtIso,
+    ...(shareNow ? {} : { dueAt: dueAtIso }),
     text: caption,
     metadata: { facebook: { type: "post" } },
     assets: [
@@ -610,7 +610,32 @@ async function createPost({ channelId, imageUrl, dueAtIso, caption, altText }) {
   if (payload.message) {
     throw new Error(`createPost failed: ${payload.message}`);
   }
-  console.log(`  Scheduled: dueAt=${dueAtIso} -> post ${payload.post.id}`);
+  console.log(shareNow ? `  Published now -> post ${payload.post.id}` : `  Scheduled: dueAt=${dueAtIso} -> post ${payload.post.id}`);
+}
+
+// One-off: publish a weekday/fixed AM PM track's post for today right now
+// (set POST_NOW_TRACK=WORKABROAD etc. via the workflow's manual-run input).
+async function postNow(trackName) {
+  const track = TRACKS.find((t) => t.name === trackName);
+  if (!track || !["weekday", "fixed"].includes(track.format)) {
+    throw new Error(`POST_NOW_TRACK "${trackName}" is not a weekday/fixed track`);
+  }
+  const dateStr = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  const weekdayNum = weekdayNumberForDate(dateStr);
+  const entry =
+    track.format === "fixed"
+      ? { fileId: track.fixedFileId, name: `${track.fixedFileId}.png` }
+      : (await buildWeekdayMap(track))[weekdayNum];
+  if (!entry) throw new Error(`No image for weekday ${weekdayNum} in ${trackName}`);
+  const caption = track.captions ? track.captions[weekdayNum - 1] : track.caption;
+  const imageUrl = await mirrorDriveFileToGithub(entry.fileId, `${track.name}/${entry.name}`);
+  await createPost({
+    channelId: CHANNEL_ID,
+    imageUrl,
+    caption,
+    altText: `Around The World Manpower Services — ${track.name} — post now`,
+    shareNow: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +754,12 @@ async function retryAllErroredPosts(channelId) {
 async function main() {
   console.log(`Run started ${new Date().toISOString()}${DRY_RUN ? " [DRY RUN]" : ""}`);
   console.log(`Flat-track epoch: ${EPOCH_START} (today = Day 365, wraps to Day 1 tomorrow)`);
+
+  if (process.env.POST_NOW_TRACK) {
+    await postNow(process.env.POST_NOW_TRACK);
+    console.log("Post-now done.");
+    return;
+  }
 
   console.log(`\n--- Checking for errored posts to retry ---`);
   await retryAllErroredPosts(CHANNEL_ID);
