@@ -132,6 +132,18 @@ const WEEKDAY_HOOKS = [
 ];
 const WEEKDAY_CAPTIONS = WEEKDAY_HOOKS.map((h) => `${h}\n\n${DETAILS_BLOCK}`);
 
+const PASSPORT_CAPTION = `Gusto mong malaman kung qualified ka?
+📩 I-PM mo sa amin ang “LIBRENG PASSPORTING” kasama ang:
+
+Full Name:
+Gender:
+Contact Number:
+Target Role:
+Age:
+
+Hanggang 38 years old lamang.
+Passporting assistance is available for selected roles only.`;
+
 const FORM_CAPTION = `Para mas mabilis ang proseso ng inyong application, pakisagutan ang aming application form sa link na ito:
 
 👉 https://forms.gle/LFvTQvvFfuse5h9AA
@@ -252,6 +264,18 @@ Our team will contact you and guide you through the entire application process.`
     rotatingTimes: ["14:00:00", "15:00:00", "16:00:00", "17:00:00", "18:00:00"],
     rotationEpoch: "2026-10-01",
     caption: FORM_CAPTION,
+  },
+  {
+    // 5:30 PM post. "Wala ka pang Passport?" poster in 7 colour versions
+    // (image N = Monday..Sunday). Drive files in ATW > AM PM must be named
+    // ATW_Passport_<N>_<anything>.png (N = 1..7). Same caption every day.
+    name: "PASSPORT",
+    format: "weekday",
+    optional: true,
+    folderId: AMPM_FOLDER_ID,
+    filePattern: /^ATW_Passport_(\d)_/i,
+    postTimeLocal: "17:30:00", // 5:30 PM Manila
+    caption: PASSPORT_CAPTION,
   },
   {
     name: "AMPM_SQUARE",
