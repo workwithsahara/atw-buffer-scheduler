@@ -286,6 +286,18 @@ Our team will contact you and guide you through the entire application process.`
     postTimeLocal: "21:00:00", // 9 PM Manila
     captions: WEEKDAY_CAPTIONS,
   },
+  {
+    // 30-day "Overseas Job Opportunities" poster series. One post a day at
+    // 7 PM Manila, Post_01 on startDate through Post_30. Images and
+    // captions.json live in media/OVERSEAS30/ in this repo. Runs once (no loop).
+    name: "OVERSEAS30",
+    format: "series",
+    optional: true,
+    startDate: "2026-11-08",
+    count: 30,
+    mediaDir: "media/OVERSEAS30",
+    postTimeLocal: "19:00:00", // 7 PM Manila
+  },
 ];
 
 function requireEnv(name) {
@@ -840,7 +852,11 @@ async function main() {
 
   // Chronological within each day: if the channel's scheduled-post cap cuts a
   // day short, it is always the latest posts of the day that wait.
-  const orderedTracks = [...TRACKS].sort((a, b) => a.postTimeLocal.localeCompare(b.postTimeLocal));
+  const orderedTracks = [...TRACKS].sort((a, b) => {
+    // The one-off 30-day series gets first claim on a day's slots.
+    if ((a.format === "series") !== (b.format === "series")) return a.format === "series" ? -1 : 1;
+    return a.postTimeLocal.localeCompare(b.postTimeLocal);
+  });
 
   let consecutiveFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
@@ -871,6 +887,12 @@ async function main() {
           } else if (track.format === "weekday") {
             track._dayMap = await buildWeekdayMap(track);
             console.log(`  Loaded weekday images for days: ${Object.keys(track._dayMap).join(", ") || "none"}.`);
+          } else if (track.format === "series") {
+            const capRes = await fetch(rawGithubUrl(`${track.mediaDir}/captions.json`));
+            if (!capRes.ok) throw new Error(`captions.json fetch failed: ${capRes.status}`);
+            track._captions = await capRes.json();
+            track._dayMap = { 1: true };
+            console.log(`  Loaded ${track._captions.length} captions for the series.`);
           } else if (track.format === "fixed") {
             track._dayMap = { 1: { fileId: track.fixedFileId, name: `${track.fixedFileId}.png` } };
             console.log(`  Using fixed image ${track.fixedFileId}.`);
@@ -894,6 +916,11 @@ async function main() {
       } else if (track.format === "weekday") {
         entry = track._dayMap[weekdayNum];
         label = `Weekday${weekdayNum}`;
+      } else if (track.format === "series") {
+        const idx = Math.round((Date.parse(`${dateStr}T00:00:00Z`) - Date.parse(`${track.startDate}T00:00:00Z`)) / 86400000) + 1;
+        if (idx < 1 || idx > track.count) continue; // outside the 30-day window
+        entry = { seriesIndex: idx, name: `Post_${String(idx).padStart(2, "0")}.png` };
+        label = `Post${idx}`;
       } else if (track.format === "fixed") {
         entry = track._dayMap[1];
         label = "fixed";
@@ -910,11 +937,15 @@ async function main() {
         continue;
       }
 
-      const caption = track.captions ? track.captions[weekdayNum - 1] : track.caption;
+      const caption = track.format === "series"
+        ? track._captions[entry.seriesIndex - 1]
+        : track.captions ? track.captions[weekdayNum - 1] : track.caption;
 
       try {
         const mediaPath = `${track.name}/${entry.name}`;
-        const imageUrl = await mirrorDriveFileToGithub(entry.fileId, mediaPath);
+        const imageUrl = track.format === "series"
+          ? rawGithubUrl(`${track.mediaDir}/${entry.name}`)
+          : await mirrorDriveFileToGithub(entry.fileId, mediaPath);
         await createPost({
           channelId: CHANNEL_ID,
           imageUrl,
